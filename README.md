@@ -147,6 +147,7 @@ Tools are grouped into **bundles**, so you install only what a workflow needs. B
 | `nda` | Feynman-diagram enumeration + Naive Dimensional Analysis | feyngraph |
 | `eda` | Exact symbolic amplitudes via Mathematica/FeynCalc | `wolframscript_path` |
 | `feynrules` | BSM UFO model generation via FeynRules | `feynrules_path`, `wolframscript_path` |
+| `visual_inspection` | Board preflight, inspection, and saved-result reading | Separate visual-inspection repository/environment and explicit path configuration |
 
 Additional domain bundles (e.g. `hepmc`/`delphes` detector simulation, `pythia`-only showering, `llp` long-lived-particle reach studies) ship on their respective feature branches. Inspect [`toolkit.yaml`](toolkit.yaml) for the authoritative, up-to-date list.
 
@@ -159,6 +160,7 @@ Some bundles ship a **skill** — a written guide to using their tools well, cov
 | Skill | Covers | Bundle |
 |-------|--------|--------|
 | `feynrules` | Declaring mass and width once, tagging BSM couplings with an interaction order, checking the UFO before MG5 sees it | `feynrules` |
+| `visual-inspection` | Preflight, board inspection, saved evidence, uncertainty, and calibration failures | `visual_inspection` |
 | `mg5` | Shallow comma decay chains and the `NP=N` alternative, `compute_widths` ordering, reading past MG5's auto-conversion error mask | `mg5` |
 
 Each skill names a bundle, and `tb connect` surfaces it only when that bundle's tools are actually being served — so the `mg5` guide stays hidden until `mg5_path` is set, since without it the tools it describes aren't there either. `tb deactivate heptapod__mg5` turns one off; `tb activate` turns it back on.
@@ -190,6 +192,45 @@ tb config validate heptapod                                     # check required
 ```
 
 `base_directory` defaults to the directory the agent launched `tb serve` from; pin it per-project when you want a fixed sandbox.
+
+### Visual inspection bundle
+
+Configure the installed toolkit with explicit absolute paths, then activate its
+bundle. The ML dependencies stay in the visual-inspection environment. Root lists
+use JSON-array strings in toolbase configuration; direct Orchestral construction
+also accepts Python lists.
+
+```bash
+tb config set heptapod visual_inspection_repo /absolute/path/to/visual-inspection --project
+tb config set heptapod visual_inspection_python /absolute/path/to/visual-inspection/venv/bin/python --project
+tb config set heptapod visual_inspection_data_roots '["/absolute/path/to/board-data"]' --project
+tb config set heptapod visual_inspection_artifact_root /absolute/path/to/inspection-runs --project
+tb config set heptapod visual_inspection_timeout 60 --project
+tb activate heptapod/visual_inspection --project
+```
+
+The first four settings gate discovery. The per-toolkit MCP names are
+`VisualInspectionPreflight`, `InspectBoard`, and `ReadInspectionResult`;
+toolbase's aggregate interface prefixes them with `heptapod__`.
+Configuration presence permits discovery; preflight checks actual pipeline readiness.
+The inspected board and reference must be within the configured data roots.
+
+Board writes default to disabled. To authorize inspection sidecars and adjacent
+lock files, configure the intended writable directory within a read root:
+
+```bash
+tb config set heptapod visual_inspection_writable_data_roots '["/absolute/path/to/board-data"]' --project
+```
+
+Preflight takes `config_path` and optional `board_path`; inspection adds `force`.
+Reading takes `result_path`, including prior snapshots beneath the artifact root.
+Read `result.ready` after preflight and preserve regional `uncertain` decisions.
+Saved-result reading verifies structure and reports freshness as unverified.
+Force never bypasses calibration. Bundle registration and synthetic transport tests
+do not establish real-board detection accuracy; real-data acceptance remains pending.
+
+See the [reproducible inspection example](examples/visual_inspection/README.md) for
+synthetic served checks and a CLI workflow with explicit JSON configuration.
 
 ### LLM providers (Orchestral demos only)
 

@@ -35,6 +35,31 @@ config:
     description: Enable INSPIRE query caching.
     type: boolean
     default: false
+  - name: visual_inspection_repo
+    description: Absolute visual-inspection repository path. Required for the visual_inspection bundle.
+    type: path
+    required: false
+  - name: visual_inspection_python
+    description: Absolute Python executable in the separate visual-inspection environment; preserve its venv symlink.
+    type: path
+    required: false
+  - name: visual_inspection_data_roots
+    description: JSON array of absolute allowed data directories, for example ["/data/boards"]. Required for visual_inspection.
+    type: string
+    required: false
+  - name: visual_inspection_artifact_root
+    description: Absolute root for bridge logs, run records, and snapshots.
+    type: path
+    required: false
+  - name: visual_inspection_writable_data_roots
+    description: JSON array of absolute writable board directories within data roots. Empty disables inspection writes.
+    type: string
+    default: '[]'
+  - name: visual_inspection_timeout
+    description: Maximum runtime in seconds for each visual-inspection worker.
+    type: float
+    default: 60.0
+    min: 0.001
 bundles:
   # ── lightweight / always-available ───────────────────────────────
   units: {}                              # pure python; nothing to install
@@ -83,7 +108,27 @@ bundles:
   # ── BSM model UFO generation via Mathematica/FeynRules ───────────
   feynrules:
     requires: [feynrules_path, wolframscript_path]
+  # ML dependencies belong to the separately configured upstream interpreter.
+  visual_inspection:
+    requires:
+      - visual_inspection_repo
+      - visual_inspection_python
+      - visual_inspection_data_roots
+      - visual_inspection_artifact_root
+
 tools:
+  - module: tools.visual_inspection.agent_tools
+    name: VisualInspectionPreflightTool
+    description: Check inputs, calibration, and write policy without inference; ready may be false.
+    bundle: visual_inspection
+  - module: tools.visual_inspection.agent_tools
+    name: InspectBoardTool
+    description: Inspect a processed board with validated calibration and explicit board write authorization.
+    bundle: visual_inspection
+  - module: tools.visual_inspection.agent_tools
+    name: ReadInspectionResultTool
+    description: Validate and read saved results, preserving uncertainty; freshness remains unverified.
+    bundle: visual_inspection
   - module: tools.analysis.conversions
     name: EventJSONLToNumpyTool
     description: Convert a JSONL event dataset into a zero-padded NumPy array.

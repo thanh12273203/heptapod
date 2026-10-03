@@ -1,0 +1,8 @@
+{
+  "repository": "/absolute/path/to/visual-inspection",
+  "python": "/absolute/path/to/visual-inspection/venv/bin/python",
+  "data_roots": ["/absolute/path/to/board-data"],
+  "artifact_root": "/absolute/path/to/inspection-runs",
+  "writable_data_roots": [],
+  "timeout_seconds": 60
+}
