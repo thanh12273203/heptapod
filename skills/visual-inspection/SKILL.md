@@ -1,7 +1,7 @@
 ---
 name: visual-inspection
 bundle: visual_inspection
-description: Inspect processed HGCAL board tensors through HEPTAPOD, diagnose preflight blockers, and interpret saved legacy or regional results. Use for the visual-inspection pipeline; physical scanning, training, calibration, and annotation changes are separate tasks.
+description: Inspect processed HGCAL board tensors through HEPTAPOD, diagnose preflight blockers, and interpret saved whole-segment results. Use for the visual-inspection pipeline; physical scanning, training, calibration, and annotation changes are separate tasks.
 ---
 
 # Visual inspection
@@ -37,28 +37,22 @@ It needs no inference or writable board root. For a new inspection:
 Training, calibration, annotation mutations, and scanner operation are distinct
 operations. An inspection request does not authorize them. If stale calibration
 blocks inspection, report the mismatch and the separate calibration action needed;
-do not silently launch it or replace canonical artifacts. Missing regional review
-inputs must come from reviewed data, never fabricated labels or assumed normality.
+do not silently launch it or replace canonical artifacts.
 
-## Interpret the correct mode
+## Interpret whole-segment results
 
-| Result mode | Authoritative interpretation |
-| --- | --- |
-| Legacy (upstream schema absent or 1) | `pw_flags`, `ae_flags`, `hybrid_flags`: -1 skipped, 0 OK, 1 flagged. Hybrid is the intersection. Use the returned legacy summary keys. |
-| Regional (upstream schema 2) | `decision_grid`: `ok`, `flagged`, `uncertain`, `skipped`. Zero compatibility flags do not imply a pass. Use regional summary counts and retain uncertainty reasons and coverage. |
+Use `pw_flags`, `ae_flags`, and `hybrid_flags`: -1 skipped, 0 OK, 1 flagged.
+Hybrid is the intersection. Only upstream schema absent or equal to one is supported.
+Unsupported configurations and saved schemas are blockers; do not reinterpret them.
 
 Coordinates are zero-based `(row, col)` in stored source order. The UI reverses
-presentation, not data coordinates. Do not reinterpret skipped or uncertain
-segments as inspected passes. Report flags as pipeline decisions, not established
-physical defects or measured detection accuracy.
+presentation only. Skipped segments are not inspected passes. Report flags as
+pipeline decisions, not confirmed physical defects or measured detection accuracy.
 
-Reader responses bound evidence size. Check `evidence.complete`, `omitted_fields`,
-and `omitted_segment_coordinates`; full metadata and regional evidence remain in
-`result_path`. Use that artifact for omitted reference/template/calibration identity,
-coverage, scores, and reasons. Missing evidence is not negative evidence.
-
-`validation.status: valid` means saved-result structure passed upstream checks;
-regional evidence semantics are not fully validated by that loader.
+Reader responses bound metadata size. Check `evidence.complete` and
+`omitted_fields`; `result_path` contains the complete snapshot. Omitted metadata
+is not negative evidence. `validation.status: valid` means the upstream result
+loader accepted the saved structure.
 `freshness.status: unverified` means the current board, model, configuration, and
 calibration were not checked. A SHA-256 identifies captured bytes, not current
 pipeline provenance. A historical saved result must not be described as current
@@ -68,7 +62,7 @@ solely because it loaded successfully.
 
 - `cache_status: reused` means an unchanged sidecar was observed after a successful
   non-forced upstream call. `refreshed` means created or changed; it does not prove
-  every region ran inference. Preserve `unknown` when evidence is inconclusive.
+  every segment ran inference. Preserve `unknown` when evidence is inconclusive.
 - On `board_busy`, let the owning job finish or investigate its status. Do not
   delete the persistent `.inspection.lock` file. Other upstream writers, including
   a web server, may not honor this harness lock.

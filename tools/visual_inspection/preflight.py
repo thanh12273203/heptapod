@@ -3,9 +3,16 @@ import platform
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
-from . import BridgeError, resolve_read_path, source_revision, validate_sidecar
+from . import (
+    BridgeError,
+    load_upstream_config,
+    resolve_read_path,
+    resolve_upstream,
+    source_revision,
+    validate_sidecar
+)
 
 
 def _check(report: Dict, name: str, operation: Callable, code: str = 'invalid_input') -> Tuple[bool, object]:
@@ -56,79 +63,6 @@ def _device(torch: object, requested: Optional[str]) -> str:
     return str(device)
 
 
-def _regional_inventory(directory: Path) -> Dict:
-    return {
-        'directory': str(directory),
-        'manifest_present': (directory / 'manifests' / 'boards.json').is_file(),
-        'templates_present': any((directory / 'masks').glob('*/v*.json')),
-        'annotations_present': any((directory / 'annotations').glob('*/*.json')),
-        'thresholds_present': any((directory / 'thresholds').glob('*/local.json')),
-        'note': "Presence alone does not establish reviewed data or calibration compatibility."
-    }
-
-
-def _regional_context(config: object, board: Path, read_roots: List[Path], data_roots: List[Path]) -> Dict:
-    import yaml
-
-    from src.configs import LocalScoreConfig, MaskingConfig
-    from src.utils.data import RegionAnnotationStore
-
-    directory = resolve_read_path(config.annotation_dir or config.calibration_dir, read_roots, require_file=False)
-    store = RegionAnnotationStore(MaskingConfig(calibration_dir=str(directory)))
-    manifest = store.load_manifest()
-    for item in manifest['boards']:
-        resolve_read_path(str(store.config.root / item['path']), data_roots)
-
-    record = next((item for item in manifest['boards'] if (store.config.root / item['path']).resolve() == board), None)
-    if record is None:
-        raise BridgeError('unregistered_board', "Board has no regional manifest record.")
-    if not record['template']:
-        raise BridgeError('missing_template', "Board has no regional template assignment.")
-    if record['appearance_group'] == 'unknown':
-        raise BridgeError('unknown_appearance', "Regional reference routing needs explicit appearance metadata.")
-
-    template = store.load_template(**record['template'])
-    reference = next((item for item in manifest['boards'] if (item['board_id'], item['scan_id']) == (template['source']['board_id'], template['source']['scan_id'])), None)
-    if reference is None or reference['split'] != 'reference' or reference['appearance_group'] != record['appearance_group']:
-        raise BridgeError('incompatible_reference', "Template source is not an appearance-compatible reference-role board.")
-
-    scoring_path = resolve_read_path(config.local_scoring_path, read_roots)
-    with scoring_path.open(encoding='utf-8') as handle:
-        settings = LocalScoreConfig(**yaml.safe_load(handle)['local_calibration'])
-
-    return {
-        'store': store,
-        'settings': settings,
-        'reference_path': resolve_read_path(str(store.config.root / reference['path']), data_roots),
-        'summary': {
-            'board_id': record['board_id'],
-            'scan_id': record['scan_id'],
-            'appearance_group': record['appearance_group'],
-            'template': record['template'],
-            'reference_board_id': reference['board_id']
-        }
-    }
-
-
-def _local_calibration(config: object, context: Dict, skipped: object, roots: List[Path]) -> Dict:
-    from src.inspection import load_local_calibration
-    from src.utils.data import read_document
-
-    path = resolve_read_path(config.local_calibration_path, roots)
-    document = read_document(path)
-    # Validate dependency scope before the upstream validator stats those paths.
-    for dependency in document['dependencies']:
-        resolve_read_path(dependency, roots)
-
-    artifact = load_local_calibration(path, context['store'], context['settings'], Path(config.checkpoint_path), skipped)
-    return {
-        'path': str(path),
-        'regional_thresholds': len(artifact['regional_thresholds']),
-        'segment_thresholds': len(artifact['segment_thresholds']),
-        'note': "Compatible provenance does not guarantee threshold support or coverage for every target."
-    }
-
-
 def run_preflight(parameters: Dict) -> Dict:
     repository = Path.cwd().resolve()
     report = {
@@ -158,9 +92,11 @@ def run_preflight(parameters: Dict) -> Dict:
 
         import torch
 
-        from src.configs import InspectionConfig
-        from src.inspection import load_inspection_model, validate_calibration
-        from src.utils.data import GRID_SHAPE, load_skipped_segments, open_board
+        load_inspection_model = resolve_upstream('load_inspection_model')
+        validate_calibration = resolve_upstream('validate_calibration')
+        GRID_SHAPE = resolve_upstream('GRID_SHAPE')
+        load_skipped_segments = resolve_upstream('load_skipped_segments')
+        open_board = resolve_upstream('open_board')
     except ImportError as error:
         report['checks'].append({'name': 'upstream_imports', 'status': 'blocked', 'code': 'missing_dependency', 'message': str(error)})
         return _finish(report)
@@ -168,12 +104,12 @@ def run_preflight(parameters: Dict) -> Dict:
         report['checks'].append({'name': 'upstream_imports', 'status': 'blocked', 'code': 'upstream_import_failed', 'message': str(error)})
         return _finish(report)
 
-    valid, config = _check(report, 'configuration', lambda: InspectionConfig.from_yaml(str(config_path)), 'invalid_config')
+    valid, config = _check(report, 'configuration', lambda: load_upstream_config(config_path), 'invalid_config')
     if not valid:
         return _finish(report)
 
     report['resolved_config'] = asdict(config)
-    report['mode'] = 'regional' if config.local_calibration_path else 'legacy'
+    report['mode'] = 'legacy'
     board_value = str(repository / parameters.get('board_path', config.board_path))
     valid_board, board = _check(report, 'board_file', lambda: resolve_read_path(board_value, data_roots))
     checkpoint_ok, _ = _check(report, 'checkpoint_file', lambda: resolve_read_path(config.checkpoint_path, read_roots))
@@ -185,14 +121,6 @@ def run_preflight(parameters: Dict) -> Dict:
 
     _, resolved_device = _check(report, 'device', lambda: _device(torch, config.device))
     report['device'] = {'requested': config.device, 'resolved': resolved_device, 'checkpoint_validation': 'cpu'}
-    inventory_ok, inventory = _check(
-        report,
-        'regional_inventory',
-        lambda: _regional_inventory(resolve_read_path(config.annotation_dir or config.calibration_dir, read_roots, require_file=False))
-    )
-    if inventory_ok:
-        report['regional_inventory'] = inventory
-
     board_array = None
     if valid_board:
         report['board_path'] = str(board)
@@ -209,14 +137,7 @@ def run_preflight(parameters: Dict) -> Dict:
 
         _, board_array = _check(report, 'board_header', lambda: open_board(str(board)))
 
-    context = None
-    if report['mode'] == 'regional':
-        if valid_board:
-            _, context = _check(report, 'regional_documents', lambda: _regional_context(config, board, read_roots, data_roots), 'invalid_regional_documents')
-
-        reference_path = context['reference_path'] if context else None
-    else:
-        _, reference_path = _check(report, 'reference_file', lambda: resolve_read_path(config.baseline_path, data_roots))
+    _, reference_path = _check(report, 'reference_file', lambda: resolve_read_path(config.baseline_path, data_roots))
 
     reference_array = None
     if reference_path is not None:
@@ -228,26 +149,18 @@ def run_preflight(parameters: Dict) -> Dict:
         if board_array.shape != reference_array.shape:
             report['checks'].append({'name': 'shape_agreement', 'status': 'blocked', 'code': 'shape_mismatch', 'message': "Board and reference dimensions differ."})
 
-    if report['mode'] == 'legacy':
-        for name in ('ae_threshold.npy', 'pw_threshold.npy'):
-            def threshold_header() -> None:
-                path = resolve_read_path(str(Path(config.calibration_dir) / name), read_roots)
-                threshold = np.load(path, mmap_mode='r', allow_pickle=False)
-                if threshold.shape != GRID_SHAPE or not np.isfinite(threshold).all():
-                    raise ValueError(f"Thresholds must be finite arrays with shape `{GRID_SHAPE}`.")
+    for name in ('ae_threshold.npy', 'pw_threshold.npy'):
+        def threshold_header() -> None:
+            path = resolve_read_path(str(Path(config.calibration_dir) / name), read_roots)
+            threshold = np.load(path, mmap_mode='r', allow_pickle=False)
+            if threshold.shape != GRID_SHAPE or not np.isfinite(threshold).all():
+                raise ValueError(f"Thresholds must be finite arrays with shape `{GRID_SHAPE}`.")
 
-            _check(report, name, threshold_header, 'invalid_threshold')
+        _check(report, name, threshold_header, 'invalid_threshold')
 
-        manifest_ok, _ = _check(report, 'calibration_manifest', lambda: resolve_read_path(str(Path(config.calibration_dir) / 'manifest.json'), read_roots))
-        if manifest_ok and checkpoint_ok and skips_ok and reference_path is not None:
-            _check(report, 'calibration_provenance', lambda: validate_calibration(config), 'incompatible_calibration')
-    else:
-        local_file_ok, _ = _check(report, 'local_calibration_file', lambda: resolve_read_path(config.local_calibration_path, read_roots))
-        if context and local_file_ok and checkpoint_ok and skips_ok:
-            calibration_ok, summary = _check(report, 'calibration_provenance', lambda: _local_calibration(config, context, skipped, read_roots), 'incompatible_calibration')
-            if calibration_ok:
-                report['local_calibration'] = summary
-                report['regional_context'] = context['summary']
+    manifest_ok, _ = _check(report, 'calibration_manifest', lambda: resolve_read_path(str(Path(config.calibration_dir) / 'manifest.json'), read_roots))
+    if manifest_ok and checkpoint_ok and skips_ok and reference_path is not None:
+        _check(report, 'calibration_provenance', lambda: validate_calibration(config), 'incompatible_calibration')
 
     blockers = [item for item in report['checks'] if item['status'] == 'blocked' and item['name'] != 'sidecar_policy']
     if not blockers and board_array is not None:

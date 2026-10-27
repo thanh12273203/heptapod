@@ -1,0 +1,8 @@
+# Loadout: default
+# Toolkits below are what the agent sees. Edit with tb activate /
+# tb deactivate, or by hand. Run `tb loadout tools` to see available
+# bundles + tools per toolkit.
+toolkits:
+  heptapod:
+    bundles:
+    - visual_inspection

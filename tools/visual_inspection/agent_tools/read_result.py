@@ -12,7 +12,7 @@ class ReadInspectionResultTool(VisualInspectionToolState):
 
     def _setup(self) -> None:
         self.name = 'ReadInspectionResultTool'
-        self.description = "Read a saved inspection result with upstream structural validation, source coordinates, and bounded evidence. Preserve regional uncertainty. Freshness is unverified; full evidence is saved in a per-run snapshot."
+        self.description = "Read a saved inspection result with upstream structural validation, source coordinates, and bounded evidence. Freshness is unverified; full evidence is saved in a per-run snapshot."
 
     def _run(self) -> str:
         try:

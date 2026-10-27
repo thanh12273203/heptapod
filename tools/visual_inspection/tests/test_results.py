@@ -26,13 +26,11 @@ class InspectionResults:
         return result
 
     def summary(self):
-        if self.payload.get('schema_version') == 2:
-            return self.payload['local']['counts']
         return {'pixel_flagged': 1, 'autoencoder_flagged': 1, 'hybrid_flagged': 1, 'skipped': 1}
 '''
 
 
-def saved_result(local: bool = False) -> Dict:
+def saved_result() -> Dict:
     grid = [[0 for _ in range(5)] for _ in range(8)]
     grid[0][0] = -1
     grid[1][2] = 1
@@ -42,21 +40,6 @@ def saved_result(local: bool = False) -> Dict:
         'inspected_path': '/unavailable/board.npy',
         'metadata': {'board_shape': [8, 5], 'signature': {'checkpoint': 'obsolete'}}
     }
-    if local:
-        decisions = [['ok' for _ in range(5)] for _ in range(8)]
-        decisions[0][0] = 'skipped'
-        decisions[1][2] = 'flagged'
-        decisions[2][3] = 'uncertain'
-        segments = [
-            {'row': row, 'col': col, 'decision': decision, 'reasons': ['coverage_missing'] if decision == 'uncertain' else [], 'regions': [{'score': 0.4}]}
-            for row, values in enumerate(decisions) for col, decision in enumerate(values) if decision != 'skipped'
-        ]
-        payload.update(schema_version=2, local={
-            'schema_version': 1, 'decision_grid': decisions,
-            'counts': {'ok': 37, 'flagged': 1, 'uncertain': 1, 'skipped': 1},
-            'segments': segments, 'reference_identity': 'reference-v1'
-        })
-
     return payload
 
 
@@ -97,33 +80,29 @@ class ResultReaderTests(unittest.TestCase):
         self.assertEqual(list(self.data.iterdir()), [self.source])
         self.assertTrue(Path(response['execution']['record_path']).is_file())
 
-    def test_regional_uncertainty_and_evidence(self) -> None:
-        response = self.read(saved_result(True))
-        self.assertEqual(response['status'], 'ok', response)
-        result = response['result']
-        self.assertEqual(result['summary']['uncertain'], 1)
-        self.assertEqual(result['hybrid_flags'][2][3], 0)
-        self.assertEqual(result['coordinates']['uncertain'], [[2, 3]])
-        self.assertNotIn([2, 3], result['coordinates']['ok'])
-        evidence = next(item for item in result['evidence']['segments'] if item['row'] == 2 and item['col'] == 3)
-        self.assertEqual(evidence['reasons'], ['coverage_missing'])
-        self.assertTrue(result['evidence']['complete'])
+    def test_unsupported_schema_and_payload_are_rejected(self) -> None:
+        for version in (2, 3, True, '1'):
+            payload = saved_result()
+            payload['schema_version'] = version
+            response = self.read(payload)
+            self.assertEqual(response['error']['code'], 'invalid_result')
+        payload = saved_result()
+        payload['local'] = {'decision_grid': []}
+        self.assertEqual(self.read(payload)['error']['code'], 'invalid_result')
 
     def test_evidence_is_bounded_and_complete_snapshot_retained(self) -> None:
-        payload = saved_result(True)
-        payload['local']['segments'][0]['large_evidence'] = 'x' * 200000
+        payload = saved_result()
         payload['metadata']['large_metadata'] = 'y' * 200000
         response = self.read(payload)
         self.assertEqual(response['status'], 'ok', response)
         result = response['result']
         self.assertFalse(result['evidence']['complete'])
         self.assertIn('metadata', result['evidence']['omitted_fields'])
-        self.assertEqual(result['evidence']['omitted_segment_coordinates'], [[0, 1]])
         self.assertLess(len(json.dumps(response)), 180000)
         self.assertEqual(json.loads(Path(result['result_path']).read_text()), payload)
 
     def test_artifact_snapshot_can_be_read_again(self) -> None:
-        first = self.read(saved_result(True))
+        first = self.read(saved_result())
         second = InspectionBridge(self.config).execute('read_result', {'result_path': first['result']['result_path']})
         self.assertEqual(second['status'], 'ok', second)
         self.assertEqual(first['result']['source_sha256'], second['result']['source_sha256'])
@@ -191,25 +170,19 @@ class ResultReaderTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('VISUAL_INSPECTION_TEST_REPO'), 'Optional actual upstream loader integration')
 class UpstreamReaderTests(unittest.TestCase):
-    def test_actual_loader_legacy_local_and_malformed(self) -> None:
+    def test_actual_loader_whole_segment_and_malformed(self) -> None:
         repository = Path(os.environ['VISUAL_INSPECTION_TEST_REPO'])
         interpreter = Path(os.environ['VISUAL_INSPECTION_TEST_PYTHON'])
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = BridgeConfig(repository, interpreter, (root,), root / 'runs')
             source = root / 'result.json'
-            for local in (False, True):
-                payload = saved_result(local)
-                source.write_text(json.dumps(payload))
-                response = InspectionBridge(config).execute('read_result', {'result_path': str(source)})
-                self.assertEqual(response['status'], 'ok', response)
-                self.assertEqual(response['result']['freshness']['status'], 'unverified')
-                if local:
-                    self.assertEqual(response['result']['coordinates']['uncertain'], [[2, 3]])
-                    payload['local']['counts']['uncertain'] = 0
-                else:
-                    payload['pw_flags'][0][1] = 7
-
-                source.write_text(json.dumps(payload))
-                response = InspectionBridge(config).execute('read_result', {'result_path': str(source)})
-                self.assertEqual(response['error']['code'], 'invalid_result')
+            payload = saved_result()
+            source.write_text(json.dumps(payload))
+            response = InspectionBridge(config).execute('read_result', {'result_path': str(source)})
+            self.assertEqual(response['status'], 'ok', response)
+            self.assertEqual(response['result']['freshness']['status'], 'unverified')
+            payload['pw_flags'][0][1] = 7
+            source.write_text(json.dumps(payload))
+            response = InspectionBridge(config).execute('read_result', {'result_path': str(source)})
+            self.assertEqual(response['error']['code'], 'invalid_result')

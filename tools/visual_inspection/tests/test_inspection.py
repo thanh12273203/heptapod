@@ -27,23 +27,12 @@ class InspectionConfig:
     checkpoint_path: str
     skipped_segments_path: str
     calibration_dir: str
-    local_scoring_path: str
-    local_calibration_path: str = None
-    annotation_dir: str = None
     device: str = None
     model: dict = field(default_factory=dict)
 
     @classmethod
     def from_yaml(cls, path):
         return cls(**json.loads(Path(path).read_text())['inspection'])
-
-@dataclass
-class MaskingConfig:
-    calibration_dir: str
-
-    @property
-    def root(self):
-        return Path(__file__).resolve().parents[2]
 '''
 
 RESULT_SOURCE = '''
@@ -58,12 +47,12 @@ class InspectionResults:
         return self.payload
 
     def summary(self):
-        return self.payload['local']['counts'] if 'local' in self.payload else self.payload['metadata']['counts']
+        return self.payload['metadata']['counts']
 
     @classmethod
     def load_json(cls, path):
         payload = json.loads(Path(path).read_text())
-        if 'pw_flags' not in payload or (payload.get('schema_version') == 2 and 'decision_grid' not in payload['local']):
+        if 'pw_flags' not in payload:
             raise ValueError('Invalid synthetic sidecar')
         return cls(payload)
 '''
@@ -97,14 +86,6 @@ def inspect_board(config, board_path=None, force=False):
         'baseline_path': config.baseline_path, 'inspected_path': str(board),
         'metadata': {'board_shape': [8, 5], 'counts': {'pixel_flagged': 1, 'autoencoder_flagged': 1, 'hybrid_flagged': 1, 'skipped': 8}}
     }
-    if config.local_calibration_path:
-        decisions = [['skipped' if value == -1 else 'flagged' if value == 1 else 'ok' for value in row] for row in flags]
-        decisions[2][1] = 'uncertain'
-        payload.update(schema_version=2, local={
-            'schema_version': 1, 'decision_grid': decisions,
-            'counts': {'ok': 30, 'flagged': 1, 'uncertain': 1, 'skipped': 8},
-            'segments': [{'row': 2, 'col': 1, 'reason': 'missing_calibration_or_coverage', 'evidence': 'x' * 100000}]
-        })
     if (calibration / 'wrong_board').exists():
         payload['inspected_path'] = config.baseline_path
     if not (calibration / 'no_sidecar').exists():
@@ -113,22 +94,6 @@ def inspect_board(config, board_path=None, force=False):
         os.replace(temporary, destination)
     return InspectionResults(payload)
 '''
-
-STORE_SOURCE = '''
-import json
-from pathlib import Path
-
-def read_document(path):
-    return json.loads(Path(path).read_text())
-
-class RegionAnnotationStore:
-    def __init__(self, config):
-        self.config = config
-
-    def load_manifest(self):
-        return read_document(Path(self.config.calibration_dir) / 'manifests' / 'boards.json')
-'''
-
 
 class InspectionTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -140,7 +105,7 @@ class InspectionTests(unittest.TestCase):
             'src/__init__.py': '',
             'src/configs/__init__.py': CONFIG_SOURCE,
             'src/utils/__init__.py': RESULT_SOURCE,
-            'src/utils/data/__init__.py': STORE_SOURCE,
+            'src/utils/data/__init__.py': '',
             'src/inspection/__init__.py': INSPECTION_SOURCE,
             'torch.py': 'from types import SimpleNamespace\ncuda = SimpleNamespace(is_available=lambda: False)\n'
         }
@@ -163,8 +128,7 @@ class InspectionTests(unittest.TestCase):
             'baseline_path': str(self.reference),
             'checkpoint_path': str(self.repo / 'weights.pt'),
             'skipped_segments_path': str(self.calibration / 'skip.json'),
-            'calibration_dir': str(self.calibration),
-            'local_scoring_path': str(self.repo / 'scoring.yaml')
+            'calibration_dir': str(self.calibration)
         }
         for path in (self.board, self.reference, Path(self.settings['checkpoint_path']), Path(self.settings['skipped_segments_path'])):
             path.touch()
@@ -303,15 +267,6 @@ class InspectionTests(unittest.TestCase):
         self.assertEqual(record['response'], response)
         return record
 
-    def _local(self) -> None:
-        self.settings['local_calibration_path'] = str(self.calibration / 'local.json')
-        Path(self.settings['local_calibration_path']).write_text(json.dumps({'dependencies': [self.settings['checkpoint_path']]}))
-        Path(self.settings['local_scoring_path']).touch()
-        manifest = self.calibration / 'manifests' / 'boards.json'
-        manifest.parent.mkdir()
-        manifest.write_text(json.dumps({'boards': [{'path': str(self.board)}, {'path': str(self.reference)}]}))
-        self._save_config()
-
     def test_legacy_cache_force_and_durable_records(self) -> None:
         first = self._run()
         self.assertEqual(first['status'], 'ok', first)
@@ -330,48 +285,32 @@ class InspectionTests(unittest.TestCase):
         self.assertTrue(snapshot.exists())
         self._record(third)
 
-    def test_regional_uncertainty_and_full_evidence_snapshot(self) -> None:
-        self._local()
-        response = self._run()
-        self.assertEqual(response['status'], 'ok', response)
-        result = response['result']
-        self.assertEqual(result['upstream_schema_version'], 2)
-        self.assertEqual(result['decision_grid'][2][1], 'uncertain')
-        self.assertEqual(result['hybrid_flags'][2][1], 0)
-        self.assertEqual(result['summary']['uncertain'], 1)
-        self.assertLess(len(json.dumps(response)), 10000)
-        snapshot = json.loads(Path(result['result_path']).read_text())
-        self.assertEqual(len(snapshot['local']['segments'][0]['evidence']), 100000)
-        self._record(response)
-        cached = self._run()
-        self.assertEqual(cached['result']['cache_status'], 'reused')
-
-    def test_cached_result_cannot_be_mislabeled_as_the_other_mode(self) -> None:
-        self._local()
-        self.assertEqual(self._run()['status'], 'ok')
-        self.settings['local_calibration_path'] = None
+    def test_unsupported_configuration_does_not_run_inference(self) -> None:
+        self.settings['local_calibration_path'] = '/unsupported.json'
         self._save_config()
         response = self._run()
+        self.assertEqual(response['error']['code'], 'unsupported_capability')
+        self.assertFalse(self.sidecar.exists())
+        self.assertFalse((self.calibration / 'entered').exists())
+
+    def test_unsupported_cached_result_is_rejected(self) -> None:
+        self.assertEqual(self._run()['status'], 'ok')
+        payload = json.loads(self.sidecar.read_text())
+        payload['schema_version'] = 2
+        self.sidecar.write_text(json.dumps(payload))
+        response = self._run()
         self.assertEqual(response['error']['code'], 'invalid_result')
-        self.assertIn('schema', response['error']['message'])
 
-    def test_stale_calibration_rejects_cached_and_forced_runs_in_both_modes(self) -> None:
-        for mode in ('legacy', 'regional'):
-            with self.subTest(mode=mode):
-                if mode == 'regional':
-                    self._local()
-
-                self.assertEqual(self._run(force=True)['status'], 'ok')
-                unchanged = self.sidecar.read_bytes()
-                (self.calibration / 'stale').touch()
-                for force in (False, True):
-                    response = self._run(force)
-                    self.assertEqual(response['error']['code'], 'inspection_failed')
-                    self.assertIn('recalibrate', response['error']['message'])
-                    self.assertEqual(self.sidecar.read_bytes(), unchanged)
-                    self.assertEqual(self._record(response)['inspection_context']['stage'], 'upstream_inspection')
-
-                (self.calibration / 'stale').unlink()
+    def test_stale_calibration_rejects_cached_and_forced_runs(self) -> None:
+        self.assertEqual(self._run(force=True)['status'], 'ok')
+        unchanged = self.sidecar.read_bytes()
+        (self.calibration / 'stale').touch()
+        for force in (False, True):
+            response = self._run(force)
+            self.assertEqual(response['error']['code'], 'inspection_failed')
+            self.assertIn('recalibrate', response['error']['message'])
+            self.assertEqual(self.sidecar.read_bytes(), unchanged)
+            self.assertEqual(self._record(response)['inspection_context']['stage'], 'upstream_inspection')
 
     def test_no_write_root_and_symlink_sidecar_block_execution(self) -> None:
         self.config = replace(self.config, writable_data_roots=())

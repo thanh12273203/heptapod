@@ -1,0 +1,7 @@
+schema_version: 1
+visual_inspection_repo: /home/thanh/projects/heptapod/examples/visual_inspection/artifacts/main-demo-v1/upstream
+visual_inspection_python: /home/thanh/projects/heptapod/../visual-inspection/venv/bin/python
+visual_inspection_data_roots: '["/home/thanh/projects/heptapod/examples/visual_inspection/artifacts/main-demo-v1"]'
+visual_inspection_artifact_root: /home/thanh/projects/heptapod/examples/visual_inspection/artifacts/main-demo-v1/runs
+visual_inspection_writable_data_roots: '["/home/thanh/projects/heptapod/examples/visual_inspection/artifacts/main-demo-v1/data/demonstration"]'
+visual_inspection_timeout: 1800.0

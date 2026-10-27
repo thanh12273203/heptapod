@@ -6,7 +6,7 @@ import stat
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from . import BridgeError, resolve_read_path, source_revision
+from . import BridgeError, resolve_read_path, source_revision, validate_result_schema
 
 
 MAX_RESULT_BYTES = 32 * 1024 * 1024
@@ -38,9 +38,6 @@ def _coordinates(grid: List, value: object) -> List:
 
 def _evidence(payload: Dict) -> Dict:
     available = {'metadata': payload['metadata']}
-    if isinstance(payload.get('local'), dict):
-        available['local_context'] = {key: value for key, value in payload['local'].items() if key not in ('segments', 'decision_grid', 'counts')}
-
     included = {}
     omitted = []
     remaining = EVIDENCE_BYTES
@@ -52,22 +49,12 @@ def _evidence(payload: Dict) -> Dict:
         else:
             omitted.append(key)
 
-    segments = []
-    omitted_coordinates = []
-    for segment in (payload.get('local') or {}).get('segments', []):
-        size = len(json.dumps(segment, allow_nan=False).encode('utf-8')) + 2
-        if size <= remaining:
-            segments.append(segment)
-            remaining -= size
-        else:
-            omitted_coordinates.append([segment['row'], segment['col']])
-
     return {
         'fields': included,
-        'segments': segments,
+        'segments': [],
         'omitted_fields': omitted,
-        'omitted_segment_coordinates': omitted_coordinates,
-        'complete': not omitted and not omitted_coordinates,
+        'omitted_segment_coordinates': [],
+        'complete': not omitted,
         'full_evidence': 'result_path contains the complete saved payload, including any omitted evidence.'
     }
 
@@ -94,8 +81,7 @@ def read_inspection_result(parameters: Dict, run_directory: Path) -> Dict:
         payload = json.loads(raw, object_pairs_hook=_object, parse_float=_number, parse_constant=_number)
         if not isinstance(payload, dict) or payload.get('metadata', {}).get('board_shape') != [8, 5]:
             raise ValueError("Expected a saved result with source grid shape `[8, 5]`.")
-        if type(payload.get('schema_version', 1)) is not int:
-            raise ValueError("Result schema version must be an integer.")
+        validate_result_schema(payload)
 
         for key in ('baseline_path', 'inspected_path'):
             if not isinstance(payload.get(key), str) or not payload[key] or len(payload[key]) > 8192:
@@ -108,21 +94,16 @@ def read_inspection_result(parameters: Dict, run_directory: Path) -> Dict:
         from src.utils import InspectionResults
 
         persisted = InspectionResults.load_json(str(snapshot))
-        local = payload.get('schema_version', 1) == 2
-        if local:
-            grid = payload['local']['decision_grid']
-            coordinates = {decision: _coordinates(grid, decision) for decision in ('ok', 'flagged', 'uncertain', 'skipped')}
-        else:
-            coordinates = {key: _coordinates(payload[key], 1) for key in ('pw_flags', 'ae_flags', 'hybrid_flags')}
-            coordinates['skipped'] = _coordinates(payload['pw_flags'], -1)
+        coordinates = {key: _coordinates(payload[key], 1) for key in ('pw_flags', 'ae_flags', 'hybrid_flags')}
+        coordinates['skipped'] = _coordinates(payload['pw_flags'], -1)
 
         revision = source_revision(Path.cwd())
         revision['tracked_changes'] = bool(revision['tracked_changes']) if revision['tracked_changes'] is not None else None
         response = {
             'schema_version': 'visual-inspection-result/1',
             'upstream_schema_version': payload.get('schema_version', 1),
-            'mode': 'regional' if local else 'legacy',
-            'validation': {'status': 'valid', 'scope': 'Saved result structure validated by upstream InspectionResults.load_json; regional evidence semantics and accuracy are not verified.'},
+            'mode': 'legacy',
+            'validation': {'status': 'valid', 'scope': 'Saved result structure validated by upstream InspectionResults.load_json; detection accuracy is not verified.'},
             'freshness': {'status': 'unverified', 'reason': 'No current configuration, board, checkpoint, or calibration was checked. A valid saved result is not a verified current inspection.'},
             'source_path': str(source),
             'result_path': str(snapshot),
@@ -138,10 +119,6 @@ def read_inspection_result(parameters: Dict, run_directory: Path) -> Dict:
             'hybrid_flags': payload['hybrid_flags'],
             'evidence': _evidence(payload)
         }
-        if local:
-            response['decision_grid'] = grid
-            response['interpretation'] = 'Use decision_grid; zero compatibility flags do not establish a pass. Uncertain remains uncertain.'
-
         return response
     except BridgeError:
         raise

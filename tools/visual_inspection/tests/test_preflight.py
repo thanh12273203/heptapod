@@ -19,9 +19,6 @@ class _Settings:
     checkpoint_path: str
     skipped_segments_path: str
     calibration_dir: str
-    local_scoring_path: str
-    local_calibration_path: Optional[str] = None
-    annotation_dir: Optional[str] = None
     device: Optional[str] = None
     model: Dict = field(default_factory=dict)
 
@@ -45,8 +42,7 @@ class PreflightTests(unittest.TestCase):
             str(self.reference),
             str(self.checkpoint),
             str(self.skip_path),
-            str(self.calibration),
-            str(self.root / 'local.yaml')
+            str(self.calibration)
         )
         for path in (self.board, self.reference, self.checkpoint, self.skip_path, self.config_path):
             path.write_text('{}')
@@ -62,7 +58,6 @@ class PreflightTests(unittest.TestCase):
         self.open_board = Mock(return_value=SimpleNamespace(shape=(8, 5, 1060, 1882, 3), dtype='uint8'))
         self.validate = Mock()
         self.load_model = Mock(return_value=SimpleNamespace(latent_dim=64, init_filters=128, layers=[2, 2, 2]))
-        self.load_local = Mock(return_value={'regional_thresholds': {}, 'segment_thresholds': {}})
         self.load_skips = Mock(return_value={(0, 0), (7, 4)})
         self.inspect = Mock(side_effect=AssertionError('Preflight must not run inference'))
         self.modules = {}
@@ -70,11 +65,8 @@ class PreflightTests(unittest.TestCase):
             self.modules[name] = ModuleType(name)
 
         self.modules['src.configs'].InspectionConfig = SimpleNamespace(from_yaml=Mock(return_value=self.settings))
-        self.modules['src.configs'].LocalScoreConfig = lambda **kwargs: SimpleNamespace(**kwargs)
-        self.modules['src.configs'].MaskingConfig = lambda **kwargs: SimpleNamespace(root=self.root, directory=self.calibration)
         self.modules['src.inspection'].validate_calibration = self.validate
         self.modules['src.inspection'].load_inspection_model = self.load_model
-        self.modules['src.inspection'].load_local_calibration = self.load_local
         self.modules['src.inspection'].inspect_board = self.inspect
         self.modules['src.utils.data'].open_board = self.open_board
         self.modules['src.utils.data'].GRID_SHAPE = (8, 5)
@@ -95,25 +87,6 @@ class PreflightTests(unittest.TestCase):
 
     def _snapshot(self) -> Dict:
         return {str(path.relative_to(self.root)): hashlib.sha256(path.read_bytes()).hexdigest() for path in self.root.rglob('*') if path.is_file()}
-
-    def _regional(self) -> None:
-        self.settings.local_calibration_path = str(self.calibration / 'thresholds' / 'run1' / 'local.json')
-        artifact = Path(self.settings.local_calibration_path)
-        artifact.parent.mkdir(parents=True, exist_ok=True)
-        artifact.write_text(json.dumps({'dependencies': [str(self.checkpoint)]}))
-        Path(self.settings.local_scoring_path).write_text('{"local_calibration": {}}')
-        self.manifest = {
-            'boards': [
-                {'board_id': 'board', 'scan_id': 'scan1', 'path': 'data/board.npy', 'appearance_group': 'A', 'template': {'template_id': 'layout', 'version': 1}, 'split': 'test'},
-                {'board_id': 'reference', 'scan_id': 'scan1', 'path': 'data/reference.npy', 'appearance_group': 'A', 'template': None, 'split': 'reference'}
-            ]
-        }
-        self.store = SimpleNamespace(
-            config=SimpleNamespace(root=self.root),
-            load_manifest=Mock(return_value=self.manifest),
-            load_template=Mock(return_value={'source': {'board_id': 'reference', 'scan_id': 'scan1'}})
-        )
-        self.modules['src.utils.data'].RegionAnnotationStore = Mock(return_value=self.store)
 
     def test_ready_legacy_is_read_only_and_validates_model_on_cpu(self) -> None:
         before = self._snapshot()
@@ -136,7 +109,6 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(self._checks(report)['calibration_provenance']['code'], 'incompatible_calibration')
         self.assertEqual(self._checks(report)['checkpoint_compatibility']['status'], 'skipped')
         self.load_model.assert_not_called()
-        self.assertFalse(report['regional_inventory']['manifest_present'])
         self.assertEqual(before, self._snapshot())
 
     def test_missing_inputs_are_collected_before_loading_weights(self) -> None:
@@ -157,7 +129,7 @@ class PreflightTests(unittest.TestCase):
         self.parameters['config_path'] = str(self.config_path)
         self.modules['src.configs'] = None
         report = self._run()
-        self.assertEqual(self._checks(report)['upstream_imports']['code'], 'missing_dependency')
+        self.assertEqual(self._checks(report)['configuration']['code'], 'missing_dependency')
 
     def test_board_override_and_symlink_escape(self) -> None:
         alternate = self.data / 'alternate.npy'
@@ -206,43 +178,13 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(self._checks(self._run())['device']['code'], 'device_unavailable')
         self.load_model.assert_not_called()
 
-    def test_regional_uses_template_reference_and_local_validator(self) -> None:
-        self._regional()
-        self.settings.baseline_path = str(self.root / 'irrelevant_legacy_reference.npy')
-        before = self._snapshot()
+    def test_unsupported_configuration_stops_before_model_or_inference(self) -> None:
+        self.config_path.write_text(json.dumps({'inspection': {'local_calibration_path': '/unsupported.json'}}))
         report = self._run()
-        self.assertTrue(report['ready'], report)
-        self.assertEqual(report['mode'], 'regional')
-        self.assertEqual(report['reference']['path'], str(self.reference))
-        self.load_local.assert_called_once()
-        self.validate.assert_not_called()
-        self.assertEqual(before, self._snapshot())
-
-    def test_missing_regional_documents_and_artifact_are_reported_together(self) -> None:
-        self._regional()
-        self.store.load_manifest.side_effect = FileNotFoundError('Missing reviewed board manifest')
-        Path(self.settings.local_calibration_path).unlink()
-        report = self._run()
-        checks = self._checks(report)
-        self.assertEqual(checks['regional_documents']['code'], 'missing_file')
-        self.assertEqual(checks['local_calibration_file']['code'], 'missing_file')
+        self.assertFalse(report['ready'])
+        self.assertEqual(self._checks(report)['configuration']['code'], 'unsupported_capability')
         self.load_model.assert_not_called()
-
-    def test_regional_routing_failures_remain_blockers(self) -> None:
-        for change, code in (({'template': None}, 'missing_template'), ({'appearance_group': 'unknown'}, 'unknown_appearance'), ({'appearance_group': 'B'}, 'incompatible_reference')):
-            with self.subTest(code=code):
-                self._regional()
-                self.manifest['boards'][0].update(change)
-                report = self._run()
-                self.assertEqual(self._checks(report)['regional_documents']['code'], code)
-                self.assertFalse(report['ready'])
-
-    def test_regional_stale_provenance_blocks_model(self) -> None:
-        self._regional()
-        self.load_local.side_effect = ValueError('Calibration source documents changed')
-        report = self._run()
-        self.assertEqual(self._checks(report)['calibration_provenance']['code'], 'incompatible_calibration')
-        self.load_model.assert_not_called()
+        self.inspect.assert_not_called()
 
 
 @unittest.skipUnless(importlib.util.find_spec('orchestral'), 'Orchestral is required only for the agent wrapper.')

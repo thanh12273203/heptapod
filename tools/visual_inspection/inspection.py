@@ -7,7 +7,15 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
-from . import BridgeError, resolve_read_path, source_revision, validate_sidecar, write_json_atomic
+from . import (
+    BridgeError,
+    load_upstream_config,
+    resolve_read_path,
+    source_revision,
+    validate_result_schema,
+    validate_sidecar,
+    write_json_atomic
+)
 
 
 @contextmanager
@@ -57,29 +65,9 @@ def _scope_inputs(config: object, read_roots: List[Path], data_roots: List[Path]
     for value in (config.checkpoint_path, config.skipped_segments_path):
         resolve_read_path(value, read_roots)
 
-    if config.local_calibration_path is None:
-        resolve_read_path(config.baseline_path, data_roots)
-        for name in ('manifest.json', 'ae_threshold.npy', 'pw_threshold.npy'):
-            resolve_read_path(str(Path(config.calibration_dir) / name), read_roots)
-
-        return
-
-    from src.configs import MaskingConfig
-    from src.utils.data import RegionAnnotationStore, read_document
-
-    directory = resolve_read_path(config.annotation_dir or config.calibration_dir, read_roots, require_file=False)
-    resolve_read_path(config.local_scoring_path, read_roots)
-    artifact = resolve_read_path(config.local_calibration_path, read_roots)
-    store = RegionAnnotationStore(MaskingConfig(calibration_dir=str(directory)))
-    manifest = store.load_manifest()
-    for record in manifest['boards']:
-        resolve_read_path(str(store.config.root / record['path']), data_roots)
-
-    for dependency in read_document(artifact)['dependencies']:
-        resolve_read_path(dependency, read_roots)
-
-    # Routing/coverage gaps remain upstream uncertain decisions, not invented OKs.
-    # inspect_board performs its own provenance validation before any cache reuse.
+    resolve_read_path(config.baseline_path, data_roots)
+    for name in ('manifest.json', 'ae_threshold.npy', 'pw_threshold.npy'):
+        resolve_read_path(str(Path(config.calibration_dir) / name), read_roots)
 
 
 def run_board_inspection(parameters: Dict, run_directory: Path) -> Dict:
@@ -98,10 +86,7 @@ def run_board_inspection(parameters: Dict, run_directory: Path) -> Dict:
     write_json_atomic(context_path, context)
     try:
         config_path = resolve_read_path(context['config_path'], read_roots)
-
-        from src.configs import InspectionConfig
-
-        config = InspectionConfig.from_yaml(str(config_path))
+        config = load_upstream_config(config_path)
         context['resolved_config'] = asdict(config)
         context['stage'] = 'path_policy'
         write_json_atomic(context_path, context)
@@ -123,7 +108,7 @@ def run_board_inspection(parameters: Dict, run_directory: Path) -> Dict:
         if config.device is None:
             config.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-        context.update(resolved_config=asdict(config), device=config.device, mode='regional' if config.local_calibration_path else 'legacy', stage='lock')
+        context.update(resolved_config=asdict(config), device=config.device, mode='legacy', stage='lock')
         write_json_atomic(context_path, context)
         with board_lock(board):
             validate_sidecar(board, writable_roots)
@@ -138,6 +123,7 @@ def run_board_inspection(parameters: Dict, run_directory: Path) -> Dict:
             if after is None:
                 raise BridgeError('missing_sidecar', "Upstream inspection did not persist its result.")
 
+            validate_result_schema(json.loads(sidecar.read_text()))
             persisted = InspectionResults.load_json(str(sidecar))
             payload = persisted.to_dict()
             # JSON round-tripping can convert coordinate tuples to lists.
@@ -146,8 +132,6 @@ def run_board_inspection(parameters: Dict, run_directory: Path) -> Dict:
                 raise BridgeError('result_changed', "Persisted result differs from this inspection; another writer may be active.")
             if Path(payload['inspected_path']).resolve() != board:
                 raise BridgeError('invalid_result', "Upstream result identifies a different board.")
-            if payload.get('schema_version', 1) != (2 if config.local_calibration_path else 1):
-                raise BridgeError('invalid_result', "Upstream result schema does not match the configured inspection mode.")
 
             result_path = run_directory / 'inspection.json'
             write_json_atomic(result_path, payload)
@@ -168,10 +152,6 @@ def run_board_inspection(parameters: Dict, run_directory: Path) -> Dict:
                 'sidecar_observation': observation,
                 'cache_status': 'reused' if observation == 'unchanged' and not context['force_requested'] else 'refreshed' if observation != 'unchanged' else 'unknown'
             }
-            if payload.get('schema_version') == 2:
-                compact['decision_grid'] = payload['local']['decision_grid']
-                compact['interpretation'] = "Use decision_grid; zero compatibility flags are not passes. Full regional evidence is in result_path."
-
             context['stage'] = 'complete'
             write_json_atomic(context_path, context)
             return compact

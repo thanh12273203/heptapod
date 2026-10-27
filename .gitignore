@@ -54,3 +54,6 @@ examples/primer/cms_dimuon/
 /.mcp.json
 /opencode.json
 /.codex/
+
+# Generated visual-inspection inputs, calibration and run evidence
+/examples/visual_inspection/artifacts/

@@ -224,7 +224,7 @@ tb config set heptapod visual_inspection_writable_data_roots '["/absolute/path/t
 
 Preflight takes `config_path` and optional `board_path`; inspection adds `force`.
 Reading takes `result_path`, including prior snapshots beneath the artifact root.
-Read `result.ready` after preflight and preserve regional `uncertain` decisions.
+Read `result.ready` after preflight. Only whole-segment inspection is supported.
 Saved-result reading verifies structure and reports freshness as unverified.
 Force never bypasses calibration. Bundle registration and synthetic transport tests
 do not establish real-board detection accuracy; real-data acceptance remains pending.

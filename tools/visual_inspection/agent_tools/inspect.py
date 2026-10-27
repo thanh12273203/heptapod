@@ -12,7 +12,7 @@ class InspectBoardTool(VisualInspectionPreflightTool):
 
     def _setup(self) -> None:
         self.name = 'InspectBoardTool'
-        self.description = "Inspect one processed board using the configured upstream pipeline. Requires an authorized writable board root; saves a sidecar, result snapshot, and run record. Preserves uncertain regional decisions."
+        self.description = "Inspect one processed board using the configured upstream pipeline. Requires an authorized writable board root; saves a sidecar, result snapshot, and run record. Uses whole-segment inspection."
 
     def _run(self) -> str:
         try:

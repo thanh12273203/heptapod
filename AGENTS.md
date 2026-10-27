@@ -86,114 +86,64 @@ to its APIs. Do not mutate `sys.path` or import CLI modules from `scripts/`.
 
 ---
 
-## Current Upstream Status
+## Whole-Segment Inspection Contract
 
-### Repository audit: 2026-10-02
+HEPTAPOD supports whole-segment inspection only. The three MCP tools remain
+`VisualInspectionPreflight`, `InspectBoard`, and `ReadInspectionResult`.
+Their runtime arguments and injected configuration stay stable. Unsupported
+configuration and saved-result schemas must fail explicitly, never be silently
+interpreted as whole-segment results.
 
-Inspected visual-inspection at commit `6ca792c` with no tracked working-tree
-changes. Its original board/model/trainer/server migration is implemented;
-do not repeat that migration as a prerequisite for adapters. Reflection Runs
-1–8 are also implemented, including region storage, mask geometry, annotation
-APIs/editor/review, migration, local calibration, and local inspection.
+The pipeline stays in the sibling repository. `tools/visual_inspection/upstream.py`
+resolves package exports and the audited legacy implementation locations when an
+export is absent. This narrow compatibility boundary may import
+`src.configs.inspection_config`, `src.inspection.run`, `src.inspection.model`, and
+`src.utils.data.board_contract`. Dependency failures must propagate unchanged.
 
-Current reusable package APIs include:
+Stored boards are BGR uint8 arrays of shape `(8, 5, 1060, 1882, 3)`.
+Use upstream memory-mapped board validation. Coordinates are zero-based `(row, col)`
+in stored order; the UI reverses presentation only. The skip map is authoritative;
+the canonical mask leaves 32 of 40 positions inspectable.
 
-- `src.configs.InspectionConfig.from_yaml()`
-- `src.inspection.inspect_board()` and `validate_calibration()`
-- `src.inspection.calibrate()`, `analyze()`, `evaluate_reconstruction()`
-- `src.inspection.calibrate_local()`, `load_local_calibration()`
-- `src.utils.InspectionResults.load_json()` and result serialization
+Use `InspectionConfig.from_yaml()` followed by
+`inspect_board(config, board_path=None, force=False)`. YAML paths resolve against
+the configured upstream root; explicit board overrides resolve to absolute paths.
+Do not bypass provenance or cache policy through lower-level inference APIs.
+Calibration is validated before cache reuse. Force recomputes but never repairs
+stale calibration. The board sidecar is `<board>.inspection.json`; an artifact
+root does not relocate it. Writable board roots must be explicitly authorized.
 
-The configured reference, example board, checkpoint, and skip map exist. A fresh
-read-only call to `validate_calibration()` rejects the default configuration:
-"Baseline, checkpoint, or skip mask changed. Recalibrate before inspection."
-The standard regional manifests/masks/annotations/thresholds directories contain
-only `.gitkeep` placeholders. Synthetic examples and tests are not reviewed
-production inputs. Real inspection therefore still needs compatible calibration;
-regional inspection additionally needs a reviewed data handoff.
+Whole-segment scoring uses `1 - SSIM` for pixels and MAE after sigmoid for
+reconstructions. Flags use `score >= threshold`; hybrid is the intersection.
+Preserve `pw_flags`, `ae_flags`, `hybrid_flags`, `baseline_path`, `inspected_path`,
+and `metadata`. Flags encode `-1 = skipped`, `0 = OK`, `1 = flagged`.
+Absent upstream schema version means version one, independently of tool schemas.
+Keep the existing `mode: legacy` response value for client compatibility.
 
-Fresh verification in the sibling virtual environment:
+Preserve checkpoint-compatible model settings. The demo checkpoint uses latent
+dimension 64, initial filters 128, and layers `[2, 2, 2]`; training configuration
+is not automatically interchangeable. Model loading and scientific dependencies
+belong in the separately configured worker environment.
 
-- Focused pipeline-contract, calibration, and local-inspection tests: 29 passed,
-  with one scheduler warning from the graceful-interruption test.
-- `python -m scripts.demo_inspection --check`: 30 OK, one flagged, one uncertain,
-  eight skipped, using temporary synthetic data and a constant model.
-- No real-board inference, recalibration, training, live server, or full-suite
-  rerun was performed. The sibling tracked working tree remained unchanged.
+Record inputs, upstream revision where available, checkpoint/model settings,
+calibration, selected device, timing, outcome, and diagnostics. Keep tensors and
+weights out of responses and Git. Saved-result loading validates structure but
+reports freshness as unverified; it does not recheck the current scientific inputs.
+Flags are pipeline decisions, not confirmed physical defects or accuracy evidence.
 
-Scanner/cropper acquisition remains a placeholder. Multiple-reference aggregation,
-automatic appearance routing, glare/saturation checks, alignment/correction, and
-held-out regional accuracy validation remain future work. Legacy `analyze()` does
-not evaluate the new regional decisions.
+## Execution Boundaries
 
----
+All task edits and persistent writes stay inside HEPTAPOD. Treat the sibling as a
+read-only source of code and inputs; do not switch its branch or write source,
+sidecars, calibrations, caches, labels, or environments there. Keep copied demo
+inputs and generated outputs under the ignored
+`examples/visual_inspection/artifacts/` directory. Use independent copies, hashes,
+and an original-to-copy manifest rather than symlinks or hard links. Regenerate
+calibration for copied paths; never rewrite provenance to make it pass.
 
-## Visual Inspection Data and Result Contract
-
-Stored boards are BGR `uint8` arrays with canonical shape:
-
-```text
-(8, 5, 1060, 1882, 3)
-```
-
-Use upstream `open_board` validation and memory mapping; segment preprocessing
-converts once to normalized RGB. Source coordinates are zero-based `(row, col)`;
-the UI reverses grid presentation without changing stored coordinates. The skip
-JSON is authoritative; the canonical mask leaves 32 of 40 positions inspectable.
-
-The preferred automation boundary is:
-
-```text
-InspectionConfig.from_yaml(path)
-inspect_board(config, board_path=None, force=False) -> InspectionResults
-```
-
-YAML paths resolve against the visual-inspection repository root. Resolve explicit
-board overrides to absolute paths before invocation. Run the bridge in the sibling
-repository with its configured interpreter. `run_inspection()` is a lower-level
-API and must not be used to bypass provenance validation or cache policy.
-
-The inspection YAML uses latent dimension 64; the training YAML uses 32. Preserve
-checkpoint-compatible settings or use `model: {}` for supported CNN architecture
-inference. The shared loader currently constructs the CNN, not the ResNet model.
-
-Default whole-segment scoring is `1 - SSIM` for pixels and MAE after sigmoid for
-autoencoder reconstructions. Flags use `score >= threshold`; hybrid is the
-intersection. Native fields remain `pw_flags`, `ae_flags`, `hybrid_flags`,
-`baseline_path`, `inspected_path`, and `metadata`, with flag encoding
-`-1 = skipped`, `0 = OK`, `1 = flagged` in legacy mode.
-
-When `local_calibration_path` is configured, `inspect_board()` dispatches to local
-inspection. Preserve its schema-version-two payload and the authoritative
-`local.decision_grid`: `skipped`, `ok`, `flagged`, or `uncertain`. Zero compatibility
-flags are not passes in local mode. Retain regional evidence, coverage, uncertainty
-reasons, and reference/template/calibration identity. Report `summary()` with its
-mode-specific keys rather than assuming legacy counts. Legacy payloads can omit
-`schema_version`; treat that as upstream version one, separate from tool schema.
-
-Both modes validate calibration before cache reuse and write
-`<board>.inspection.json` beside the board. `force=True` recomputes but does not
-bypass stale calibration. An output directory alone does not relocate this sidecar.
-Legacy provenance uses path/size/mtime signatures; regional JSON documents also
-use content digests. Do not describe all artifacts as content-addressed.
-
----
-
-## Execution and Reproducibility Contract
-
-Record the input paths, repository revision, model parameters, checkpoint,
-calibration files, selected device, and execution outcome for inspection runs.
-Keep large image tensors and weights out of tool responses and version control;
-return compact flag grids, summaries, and artifact paths.
-
-The first automation target is inspection of already processed board tensors.
-Treat training, calibration, and physical acquisition as distinct operations.
-Do not let an inspection request silently launch training, replace canonical
-calibrations, or operate scanner hardware.
-
-Use explicit model parameters matching the checkpoint. Calibration and inspection
-must agree on preprocessing, segment indexing, and the model architecture.
-Surface upstream exceptions as failures rather than plausible empty results.
+Inspection must not silently train, recalibrate, scan, or change annotations.
+Those are distinct actions. Real-data readiness and held-out accuracy are separate
+from adapter readiness. Retain logs and failures rather than plausible empty results.
 
 ---
 
@@ -225,9 +175,8 @@ launch failures, malformed responses, and timeouts have actionable diagnostics.
 1. Implement `VisualInspectionPreflightTool` with staged inexpensive checks before
    loading weights: resolved configuration/mode, board headers, skip coordinates,
    checkpoint settings, artifacts, intended device, and expected writes.
-2. Reuse upstream legacy/regional calibration validators and report regional
-   manifest/template prerequisites. Distinguish stale artifacts, unavailable
-   reviewed data, and missing dependencies.
+2. Reuse upstream whole-segment calibration validation. Distinguish stale
+   artifacts, missing inputs, and missing dependencies.
 3. Do not run inference or repair calibration during preflight. Do not use board
    metadata HTTP endpoints that can trigger inspection.
 4. Account for `<board>.inspection.json` beside the board. Require an explicitly
@@ -235,13 +184,13 @@ launch failures, malformed responses, and timeouts have actionable diagnostics.
    alone does not relocate the sidecar. Add an upstream destination option if
    read-only datasets must be supported, without moving data to bypass provenance.
 
-Completion check: the current stale legacy calibration and absent regional inputs
-are reported correctly without changing data or calibration.
+Completion check: stale calibration and missing inputs are reported correctly
+without changing data or calibration.
 
 ### Run 3: Board inspection tool
 
 1. Implement `InspectBoardTool` around `src.inspection.inspect_board()` with config,
-   board, and force inputs. Preserve upstream provenance, caching, and mode dispatch.
+   board, and force inputs. Preserve upstream provenance and caching.
 2. Validate board-sidecar write containment and prevent simultaneous harness jobs
    from writing the same board result.
 3. Reuse bounded subprocess execution and save logs plus a run record containing
@@ -250,20 +199,20 @@ are reported correctly without changing data or calibration.
    execution only when evidence supports the distinction.
 5. Do not automatically recalibrate on failure or bypass validation with force.
 
-Completion check: synthetic legacy/local inspections work, stale calibration fails
+Completion check: synthetic whole-segment inspections work, stale calibration fails
 when forced, and errors/timeouts retain useful diagnostics.
 
 ### Run 4: Result reading and interpretation
 
 1. Implement `ReadInspectionResultTool` around upstream validated result loading.
-2. Support legacy payloads and regional schema version two. Preserve authoritative
-   local decisions: `ok`, `flagged`, `uncertain`, and `skipped`.
-3. Return mode-specific counts, source coordinates, and available regional evidence.
+2. Support whole-segment payloads with upstream schema absent or equal to one.
+   Reject unsupported schemas before loading them as whole-segment results.
+3. Return pixel, autoencoder, hybrid counts, source coordinates, and metadata.
    Keep responses bounded and retain full evidence in artifacts.
 4. Distinguish a structurally valid saved result from a verified current result.
 
-Completion check: uncertainty survives serialization, malformed results fail, and
-zero regional compatibility flags never become automatic passes.
+Completion check: counts and flags survive serialization; malformed and unsupported
+results fail explicitly.
 
 ### Run 5: HEPTAPOD registration
 
@@ -279,7 +228,7 @@ synthetic workflow succeeds through the served interface.
 ### Run 6: Skill and reproducible example
 
 1. Add `skills/visual-inspection/SKILL.md` for preflight, inspection, evidence
-   reading, interpretation, calibration errors, caching, and uncertainty.
+   reading, interpretation, calibration errors and caching.
 2. Keep training, calibration, annotation mutations, and scanning distinct from
    inspection requests; do not infer permission for them.
 3. Add `examples/visual_inspection/` with setup and a reproducible synthetic workflow.
@@ -295,21 +244,18 @@ to production artifacts. Report bridge, served-tool, and real-data checks separa
    avoid overwriting canonical artifacts as an incidental repair.
 3. Inspect real boards through served tools and verify persistence, cache reuse,
    forced execution, and diagnostics.
-4. For regional inspection, obtain reviewed board identities/appearance metadata,
-   templates, labels/visibility, disjoint physical-board splits, and new fitted
-   thresholds. Do not fabricate missing review data or treat unknowns as normal.
+4. Document label support, physical-board overlap, and calibration limitations.
+   Do not fabricate missing review data.
 
-Completion check: record reproducible real-board results and limitations. Regional
-acceptance remains pending without reviewed inputs. Operational acceptance is not
-held-out detection-accuracy validation.
+Completion check: record reproducible real-board results and limitations.
+Operational acceptance is not held-out detection-accuracy validation.
 
 ### Run 8: Calibration and evaluation tools
 
-1. Wrap existing `calibrate()` and `calibrate_local()` as separate explicit actions.
+1. Wrap existing `calibrate()` as separate explicit actions.
 2. Return artifact locations, provenance, sample support, and support gaps.
 3. Wrap legacy `analyze()` and `evaluate_reconstruction()`; distinguish reconstruction
    loss from defect-detection metrics and identify evaluation inputs.
-4. Extend upstream regional evaluation before offering regional accuracy reports.
 
 Completion check: generated calibration can be consumed by inspection and reports
 state their method, dataset, and limits accurately.
@@ -324,376 +270,31 @@ state their method, dataset, and limits accurately.
 Completion check: an agent starts, monitors, stops, and reads artifacts from a short
 training job. Scanner operation and annotation mutation remain separate scopes.
 
-### Run 1 implementation status
+## Implementation Status and Verification
 
-The configuration and bridge live in `tools/visual_inspection/`; the execution-only
-entry point is `scripts/visual_inspection_worker.py`. Run 1 implemented `ping`;
-Run 2 adds `preflight`; Run 3 adds `inspect`; Run 4 adds `read_result`.
-Run 5 registers the tools; Run 6 adds the workflow skill and examples. The bridge uses only the standard library and supports POSIX execution;
-other platforms fail explicitly until process-tree cleanup is implemented there.
-Configured repositories/interpreters are trusted code, and path validation is not
-an operating-system sandbox or a defense against concurrent hostile filesystem edits.
+Runs 1–6 provide the subprocess bridge, preflight, board execution, saved-result
+reader, gated MCP registration, workflow skill, and examples. The original nine-run
+sequence above remains the roadmap; calibration/evaluation tools and training job
+management are separate future work.
 
-Configuration uses absolute paths and creates no directories at initialization.
-Relative input paths resolve against the sibling repository and must stay in
-`data_roots`; relative output paths resolve below `artifact_root`. Data roots grant
-read scope only. Run 2 adds `writable_data_roots`, defaulting to no authorized
-board writes. Writable roots must be within read roots; Run 3 enforces this
-policy when executing inspection.
-Each execution creates a private run directory containing `request.json`, worker
-`response.json` when available, `stdout.log`, and `stderr.log`. The returned envelope
-also contains execution paths, return code, and elapsed time. Failed processes may
-have no response file; inspect the returned error and diagnostic logs.
+The whole-segment demo on `visual-inspection-main-demo` established operational
+acceptance using frozen upstream revision `1e995de87cb4758c6d1e145702e6ce5bb3c316a7`.
+Generated artifacts can be present locally across branch switches, but do not imply
+that every branch contains that branch's preparation and reporting scripts.
+Keep detailed acceptance and recovery records with those artifacts. Do not rewrite
+historical evidence to imply execution by subsequently modified code.
 
-Verification on 2026-10-02: 11 standard-library unittest tests pass, including
-subprocess failure/timeout cleanup, venv preservation, path containment, strict
-response validation, and imports without site packages. A real `ping` using the
-sibling virtual environment confirms Python 3.12.3 and the intended working
-directory. Focused Ruff correctness checks (`E4,E7,E9,F`) pass. No model, board
-inference, calibration, or sibling source edits were performed.
+Run the focused bridge, preflight, inspection, reader, and registration tests after
+adapter changes. Verify stdlib-only host imports, path containment, timeouts,
+locks, cache/force behavior, stale calibration rejection, and saved-result freshness.
+Use the served synthetic workflow to check MCP schemas and execution; optional
+actual-upstream reader tests use `VISUAL_INSPECTION_TEST_REPO` and
+`VISUAL_INSPECTION_TEST_PYTHON`. Test the configured real demo separately and report
+whether it reused cache or performed inference. A transport restriction in a sandbox
+must not be mistaken for pipeline failure.
 
-Use from the HEPTAPOD repository root with configured absolute paths:
-
-```python
-from pathlib import Path
-
-from tools.visual_inspection import BridgeConfig, InspectionBridge
-
-config = BridgeConfig(
-    repository=Path('/absolute/path/to/visual-inspection'),
-    python=Path('/absolute/path/to/visual-inspection/venv/bin/python'),
-    data_roots=(Path('/absolute/path/to/visual-inspection/data'),),
-    artifact_root=Path('/absolute/path/to/heptapod/logs/visual_inspection'),
-    timeout_seconds=60
-)
-result = InspectionBridge(config).execute('ping')
-```
-
-Run the bridge tests without installing optional ML or test dependencies:
-
-```bash
-PYTHONPATH=. python3 -B -m unittest discover -s tools/visual_inspection/tests -p 'test_*.py' -v
-```
-
-### Run 2 implementation status
-
-`VisualInspectionPreflightTool` is available from
-`tools.visual_inspection.agent_tools`. It is an Orchestral `BaseTool`, now registered
-in `toolkit.yaml` by Run 5. The dependency-free bridge accepts `preflight`,
-and reusable worker checks live in `tools/visual_inspection/preflight.py`.
-
-Runtime inputs are `config_path` and optional `board_path`. Inject repository,
-interpreter, allowed data roots, bridge artifact root, optional writable data roots,
-and timeout through state. Configuration and non-board artifacts may be read from
-the sibling repository or allowed read roots. Board/reference reads must stay in
-allowed data roots. Runtime parameters cannot override those state roots.
-
-The worker reports configuration/mode, source revision, package versions, board and
-reference headers, skips, device availability, calibration provenance, regional
-prerequisites, and expected sidecar writes. It uses upstream validators and loads
-checkpoint weights on CPU only after cheaper checks pass. No forward pass,
-calibration, label write, or sidecar write occurs. Bridge diagnostics and import
-caches are confined to the configured HEPTAPOD run directory. Python import
-overrides inherited from the caller are replaced by the explicit HEPTAPOD source
-root; the sibling cwd supplies its `src` package, without `sys.path` mutation.
-
-A successful tool execution has `status: ok` even when `result.ready` is false.
-Read the named `checks` for blockers and skipped checks. Missing files/dependencies,
-stale calibration, checkpoint mismatch, routing gaps, and unauthorized sidecar
-writes remain distinct. Regional mode selects the template reference, not the
-unused legacy reference path. Compatible provenance alone does not guarantee
-regional threshold support or coverage. No preflight report establishes accuracy,
-GPU memory capacity, future freshness, or a blanket pass for a board.
-
-Use the existing bridge configuration for a read-only check:
-
-```python
-report = InspectionBridge(config).execute(
-    'preflight',
-    {'config_path': 'configs/inspection.yaml'}
-)
-```
-
-Use `VisualInspectionPreflightTool(...).execute(...)` for the Orchestral wrapper;
-its state names are `visual_inspection_repo`, `visual_inspection_python`,
-`visual_inspection_data_roots`, `visual_inspection_artifact_root`,
-`visual_inspection_writable_data_roots`, and `visual_inspection_timeout`.
-Writable roots are an explicit policy input; preflight never probes them by writing.
-
-Run 2 verification on 2026-10-02: all 28 bridge/preflight tests pass under the
-HEPTAPOD interpreter, including the Orchestral wrapper. Focused Ruff correctness
-checks pass. Synthetic tests use upstream API doubles to verify readiness and
-failure handling; they do not validate model accuracy. Actual wrapper calls with
-the sibling environment confirm stale default legacy calibration and missing
-regional manifest/artifact inputs. With default empty writable roots, both also
-report unauthorized future sidecar writes. Size/mtime snapshots of 158 files under
-upstream `data/`, `calibrations/`, `logs/`, and `configs/` were unchanged. No real
-checkpoint weights were loaded because cheaper checks already found blockers;
-no inference or recalibration was performed.
-
-Tests use discovery; `tools/visual_inspection/tests/` has no `__init__.py`, and
-production code does not import test modules. To include the agent-wrapper test,
-run discovery with HEPTAPOD's interpreter where Orchestral is installed:
-
-```bash
-PYTHONPATH=. venv/bin/python -B -m unittest discover -s tools/visual_inspection/tests -p 'test_*.py' -v
-```
-
-### Run 3 implementation status
-
-`InspectBoardTool` is available from `tools.visual_inspection.agent_tools`; it
-accepts the same configuration/board inputs and state as preflight plus Boolean
-`force` (default false). The bridge also accepts operation `inspect`. Package
-exports must retain dependency order: sorting imports alphabetically can create
-circular imports between package exports and their consumers.
-
-Inspection runs under the sibling interpreter through upstream `inspect_board()`.
-It enforces input read scope and explicit writable board-root policy before writes.
-Preflight is useful for diagnostics but is not a required full second model load:
-upstream inspection remains authoritative for calibration, cache validity, scoring,
-and regional uncertainty. Force never bypasses calibration. Unknown routing or
-missing regional coverage is not silently converted into a passing result.
-
-Preflight now lists both the sidecar and lock as planned writes without creating
-either file. Each canonical board path uses an adjacent `<board>.inspection.lock` with a POSIX
-nonblocking advisory lock. Concurrent harness workers fail with `board_busy`, even
-when they use different HEPTAPOD artifact directories. Symlink locks/sidecars are
-rejected. The empty lock file persists; do not delete it to release ownership.
-Ownership ends when the process closes or exits, including timeout termination.
-Other writers, including the upstream web server, do not automatically honor this
-lock; coordinate those separately. This is not an OS sandbox against hostile
-filesystem changes.
-
-Every allocated bridge run now writes `run.json` with start/end times, outcome,
-execution/log paths, and available inspection context, including on failure and
-timeout. Inspection updates `inspection_context.json` with resolved configuration,
-source revision, selected device, input/sidecar/lock paths, force request, and stage.
-Success also saves a per-run `inspection.json` snapshot of the complete upstream
-result. The sidecar is validated through upstream `InspectionResults.load_json()`
-and checked against the returned result, board identity, and configured mode before
-success is reported. Worker tracebacks remain in `stderr.log`.
-
-Tool responses contain mode-specific counts, flag grids, paths, and the authoritative
-regional decision grid when present. Full regional evidence remains in the snapshot.
-`cache_status` is `reused` only after a successful non-forced upstream call leaves
-the sidecar identity/timestamps/content unchanged; `refreshed` means the sidecar
-was created or changed; otherwise it is `unknown`. `sidecar_observation` exposes
-the underlying evidence. Refreshed does not imply every region ran model inference.
-
-A timeout or later artifact error can occur after an upstream sidecar was committed.
-Preserve diagnostics and inspect existing results before retrying; do not promise
-rollback or automatically delete a sidecar. Readiness, compatibility, and successful
-execution still do not establish real-board defect-detection accuracy.
-
-For an already configured bridge with explicit writable data roots:
-
-```python
-result = InspectionBridge(config).execute(
-    'inspect',
-    {'config_path': 'configs/inspection.yaml', 'force': False}
-)
-```
-
-Run 3 verification on 2026-10-02: all 39 bridge/preflight/inspection tests pass,
-including subprocess fixtures for both result modes, cache reuse, force, stale
-calibration, sidecar/lock symlinks, concurrent callers using different artifact
-roots, timeout lock release, run records, and result identity/mode validation.
-Focused Ruff correctness checks pass. The baseline circular import caused by
-reordered package exports was repaired.
-
-An additional isolated smoke check exercised the actual upstream `inspect_board`
-legacy and regional paths with temporary synthetic boards and a constant model.
-Small-shape loading and model/store injection were test-only overrides. Both modes
-persisted results, reused cache, refreshed forced calls, and rejected a changed
-checkpoint signature even when forced. Regional decisions were 30 OK, one flagged,
-one uncertain, and eight skipped. This verifies library interoperability, not real
-checkpoint inference or detection accuracy. No sibling source or production
-artifacts were modified; real-board acceptance remains pending.
-
-Use `InspectBoardTool(...).execute(...)` for the Orchestral wrapper. Run 5 registers
-all three wrappers in `toolkit.yaml`. Real-board acceptance remains
-Run 7 because current production calibration is stale.
-
-### Run 4 implementation status
-
-`ReadInspectionResultTool` is available from
-`tools.visual_inspection.agent_tools`. Its sole runtime input is `result_path`;
-it uses the same configured repository, interpreter, data roots, artifact root,
-timeout, and optional writable roots as the other wrappers. Reading requires no
-writable board root and creates no board sidecar or lock. The bridge accepts
-`read_result`; reusable reader logic lives in `tools/visual_inspection/results.py`.
-
-Relative result paths resolve against the sibling repository. Read scope includes
-configured data roots and the HEPTAPOD artifact root, so both upstream sidecars and
-previous run snapshots can be read. Symlinks resolve before containment checks;
-escaping links and runtime root overrides are rejected. Referenced board/model
-paths are reported as saved identity, not followed or required to exist.
-
-The reader accepts regular JSON files up to 32 MiB, rejects duplicate keys and
-non-finite numbers, requires the canonical `[8, 5]` source grid, and copies the
-captured bytes into a private `inspection.json` snapshot. It checks for changes
-during capture and validates the snapshot with upstream
-`InspectionResults.load_json()`. Errors retain bridge logs and run records;
-a snapshot retained after failed validation is not a valid-result claim.
-
-Results include the upstream schema version (missing means legacy version one),
-mode-specific `summary()`, flag grids, zero-based source coordinates, source byte
-SHA-256, reader repository revision, and artifact paths. Regional results include
-the authoritative decision grid and coordinates for `ok`, `flagged`, `uncertain`,
-and `skipped`; zero compatibility flags never imply a pass. Returned metadata,
-regional context, and complete segment evidence entries share a 128 KiB budget.
-Omitted fields and segment coordinates are listed explicitly; the snapshot retains
-all evidence, including reference/calibration identity, coverage, and reasons.
-The byte digest identifies the captured file; it is not provenance verification.
-
-`validation.status: valid` means upstream saved-result structural checks passed.
-`freshness.status: unverified` is always explicit: reading does not validate current
-board/checkpoint/calibration signatures, rerun inference, or establish accuracy.
-The upstream loader does not fully validate regional evidence semantics. Use an
-explicit inspection request for the upstream current-calibration/cache checks;
-reading never silently upgrades a historical result into a verified current one.
-
-```python
-report = InspectionBridge(config).execute(
-    'read_result',
-    {'result_path': '/absolute/path/to/saved.inspection.json'}
-)
-```
-
-Run 4 verification on 2026-10-02: the 49-test full suite passed, followed by
-all 11 reader tests after the final read-error and relative-path additions. Both
-runs included the actual upstream loader integration. Focused Ruff correctness
-checks passed. Adapter tests cover legacy/local summaries,
-uncertainty with zero compatibility flags, strict JSON and upstream validation
-failures, read scope and symlink escapes, input/evidence bounds, snapshot rereading,
-relative paths, unchanged source files, and Orchestral runtime schema/calls.
-The optional actual-upstream loader test uses temporary synthetic JSON, including
-invalid legacy flags and inconsistent regional counts. It is enabled with
-`VISUAL_INSPECTION_TEST_REPO` and `VISUAL_INSPECTION_TEST_PYTHON` set to absolute
-paths. No inference, recalibration, sibling source edits, or production artifact
-writes are part of these checks. Registration is implemented in Run 5 below.
-
-### Run 5 implementation status
-
-`toolkit.yaml` registers `VisualInspectionPreflightTool`, `InspectBoardTool`, and
-`ReadInspectionResultTool` in the gated `visual_inspection` bundle. Discovery
-requires configured repository, interpreter, read roots, and artifact root.
-Writable roots default to empty, and timeout defaults to 60 seconds. Configuration
-presence permits discovery; it does not establish valid paths or pipeline readiness.
-The bundle adds no pip dependencies; ML remains in the separate upstream environment.
-Existing bundles and global/project activation settings are unchanged.
-
-Toolbase 0.16.0 supports scalar configuration fields, so read and writable root
-lists are declared as strings containing JSON arrays. Shared
-`VisualInspectionToolState` validates those strings into `List[str]`, including
-assignment during toolbase state injection. Direct Orchestral callers can pass
-lists. Invalid JSON, scalar/object roots, and non-string entries are rejected;
-absolute-path and containment validation still occurs in `BridgeConfig`.
-State fields are excluded from agent runtime schemas.
-
-The real toolbase per-toolkit stdio host exposes `VisualInspectionPreflight`,
-`InspectBoard`, and `ReadInspectionResult`. Toolbase's aggregate interface adds
-its toolkit namespace. Configuration and activation commands are documented in
-`README.md`; select `heptapod/visual_inspection` as the bundle. No global toolbase
-configuration or agent connection was changed during implementation.
-
-Registration tests validate metadata with the installed toolbase schema, bundle
-gating, typed configuration injection, and runtime schemas. A real MCP client
-launches the toolbase host using the registered entries and runs synthetic
-preflight → inspection → saved-result reading, followed by cache reuse, forced
-execution, and an out-of-scope read failure. The upstream pipeline in this served
-test uses lightweight doubles; transport, Orchestral wrappers, state injection,
-worker subprocesses, and artifact persistence are real. Separate Run 4 tests
-exercise the actual upstream result loader. This does not establish real-model
-inference or real-board acceptance.
-
-Run 5 verification on 2026-10-02: all 53 tests passed, including the served
-workflow and actual upstream result-loader checks. Focused Ruff correctness checks
-and `git diff --check` passed. Verification uses toolbase 0.16.0, Orchestral
-1.10.1, and MCP 2.2.0. The MCP client
-uses the SDK's automatic protocol negotiation. In this execution environment,
-stdio handshake testing requires execution outside the restricted sandbox; the
-same sandbox timeout also affects an existing units tool. No server or scientific
-code workaround is applied. Run 6 adds workflow skills/examples below; real-board
-acceptance remains Run 7.
-
-### Run 6 implementation status
-
-`skills/visual-inspection/SKILL.md` provides bundle-scoped guidance for preflight,
-inspection, evidence reading, mode-specific interpretation, uncertainty, cache
-observations, and actionable failures. Training, calibration, annotation mutations,
-and acquisition remain separate requests. The skill distinguishes saved-result
-structural validity from freshness and synthetic operation from real-data accuracy.
-Toolbase discovers this skill by directory and its `bundle: visual_inspection`
-frontmatter; no additional manifest registration is needed.
-
-`examples/visual_inspection/README.md` documents setup, expected results,
-troubleshooting, reproducible synthetic served checks, and a CLI walkthrough.
-`bridge.example.json` contains placeholder paths and disables board writes by
-default. `scripts/visual_inspection_example.py` is an execution-only CLI with
-explicit `--bridge-config` and `preflight`, `inspect`, or `read-result` subcommands.
-It uses the bridge without importing CLI modules or altering `sys.path`.
-
-The CLI emits versioned JSON with all step envelopes. Preflight blockers produce
-exit 2 and stop inspection, even with force; errors produce exit 1 and success
-exit 0. Explicit `inspect` runs preflight → inspect → read snapshot. Standalone
-reading requires no board write authorization. The JSON configuration uses native
-root arrays, while toolbase scalar settings use JSON-array strings; these are
-separate configuration surfaces. Relative inspection paths retain upstream-root
-resolution. Each bridge step records its usual private artifacts.
-
-The reproducible synthetic workflow reuses the existing served contract fixture
-through unittest discovery, avoiding a second copy of pipeline doubles. It needs
-HEPTAPOD's toolbase/Orchestral/MCP environment, no sibling inputs or API key, and
-uses temporary synthetic files. The guide explicitly states that the scientific
-pipeline is mocked. A separate subprocess test runs the new CLI's successful
-sequence, historical read, and blocked forced request with an unchanged sidecar.
-The guide also gives regional-reader and optional actual-upstream loader checks.
-
-Toolbase skill discovery and surfacing were checked in a temporary target with
-the bundle both absent and available. The generic skill validator does not accept
-toolbase's internal `bundle` key; its content check passed on an otherwise identical
-temporary copy with only that key removed. Toolbase's actual surfaced copy strips
-that internal field. No user/global skills or agent connections were changed.
-The Additional Python Conventions section remains unchanged.
-
-Run 6 verification on 2026-10-02: all 55 tests passed, including real MCP
-transport with synthetic upstream doubles, the CLI subprocess workflow, skill
-surfacing/gating, and actual upstream saved-result loading. Focused Ruff checks,
-CLI help, generic skill content validation, and `git diff --check` passed. MCP
-transport tests ran outside the restricted sandbox as described in Run 5.
-No sibling source or production artifacts were modified.
-
-Real-board inference, compatible production calibration, reviewed regional data,
-and held-out accuracy remain pending. Run 7 is the next acceptance step.
-
----
-
-## Testing Expectations
-
-For new adapters, cover:
-
-- missing repository, interpreter, input, checkpoint, and calibration files
-- incompatible board and threshold shapes and out-of-range skipped coordinates
-- structured success results and upstream exceptions
-- process failure, timeout, and malformed or missing result payloads
-- output containment and paths containing spaces
-- legacy and local schemas, uncertainty, source coordinates, and mode-specific counts
-- calibration validation before cache reuse, including forced runs
-- sidecar write containment, same-board concurrency, and child-process cleanup
-- imports without installing the visual-inspection ML stack in HEPTAPOD
-- one representative real inspection before claiming end-to-end readiness
-
-Use small fixtures and test doubles for adapter tests. A mocked pipeline verifies
-the harness contract, not scientific correctness. Run focused existing tests when
-shared framework behavior changes; external HEP tools may require separate
-installations and configuration.
-
-Run pytest from repo root with explicit import path:
-
-```bash
-PYTHONPATH=. python -m pytest path/to/test_file.py
-```
+The test folder is not a package: do not add `tests/__init__.py` or import tests
+from production code. Run discovery from the repository root with `PYTHONPATH=.`.
 
 ---
 

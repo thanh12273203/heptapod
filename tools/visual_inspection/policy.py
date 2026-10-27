@@ -17,6 +17,19 @@ def resolve_read_path(value: str, roots: List[Path], require_file: bool = True) 
 
 
 def source_revision(repository: Path) -> Dict:
+    try:
+        top = subprocess.run(
+            ['git', '--no-optional-locks', '-C', str(repository), 'rev-parse', '--show-toplevel'],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False
+        )
+        if top.returncode != 0 or Path(top.stdout.strip()).resolve() != repository.resolve():
+            return {'commit': None, 'tracked_changes': None}
+    except (OSError, subprocess.TimeoutExpired):
+        return {'commit': None, 'tracked_changes': None}
+
     result = {}
     for name, arguments in (
         ('commit', ['rev-parse', 'HEAD']),

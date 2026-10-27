@@ -34,7 +34,7 @@ PYTHONPATH=. venv/bin/python -B -m unittest discover \
 
 Expected: one passing test. This uses the same temporary API fixture and runs the
 CLI below as a subprocess, including a blocked forced request with no sidecar write.
-For regional uncertainty, including zero compatibility flags, run the reader tests:
+For saved-result validation and unsupported-schema rejection, run the reader tests:
 
 ```bash
 PYTHONPATH=. venv/bin/python -B -m unittest discover \
@@ -98,8 +98,8 @@ PYTHONPATH=. venv/bin/python -B -m scripts.visual_inspection_example \
 
 Reading accepts files inside data roots or the artifact root and marks freshness
 as unverified. It preserves full evidence in a new snapshot while bounding the
-response. Regional `decision_grid` is authoritative: `uncertain` is not a pass,
-and neither are zero compatibility flags. Coordinates remain stored zero-based
+response. Only whole-segment result schema one (or an omitted version) is supported.
+Coordinates remain stored zero-based
 `(row, col)` order.
 
 ## Agent and MCP setup
@@ -119,7 +119,6 @@ not change an agent connection or global skill directory.
 | Tools absent | Check bundle activation and the four required config values; discovery is not pipeline readiness. |
 | `ready: false` | Read named checks; resolve missing files, dependencies, model mismatch, or write policy in the relevant environment. |
 | Stale calibration | Arrange a separate, explicit calibration action; do not force past validation or replace canonical calibration as an incidental repair. |
-| Missing regional inputs | Obtain reviewed board identities, templates, labels/visibility, and compatible thresholds. Do not assume unknown regions are normal. |
 | `board_busy` | Wait for or investigate the owner. Never delete the persistent lock file to release it. |
 | Timeout/artifact failure | Read `run.json` and stderr. A sidecar may already exist; read it before retrying. |
 | Evidence omitted | Follow `result_path` to the full snapshot; omitted evidence is not a negative finding. |
