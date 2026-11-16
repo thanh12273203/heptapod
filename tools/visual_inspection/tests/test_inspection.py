@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+import venv
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -158,7 +159,7 @@ class InspectionTests(unittest.TestCase):
         metadata = yaml.safe_load((root / 'toolkit.yaml').read_text())
         state = {
             'visual_inspection_repo': str(self.repo),
-            'visual_inspection_python': sys.executable,
+            'visual_inspection_python': str(self.config.python),
             'visual_inspection_data_roots': json.dumps([str(self.data)]),
             'visual_inspection_artifact_root': str(self.config.artifact_root),
             'visual_inspection_writable_data_roots': json.dumps([str(self.data)]),
@@ -207,6 +208,12 @@ class InspectionTests(unittest.TestCase):
 
     def _prepare_preflight_fixture(self) -> None:
         # Lightweight upstream doubles; the MCP transport and tool host are real.
+        # Isolate doubles from unrelated host bundles and their scientific imports.
+        environment = self.root / 'worker environment'
+        venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
+        self.config = replace(self.config, python=environment / 'bin' / 'python')
+        (self.repo / 'yaml.py').write_text('import json\nsafe_load = json.load\n')
+
         with (self.repo / 'src' / 'inspection' / '__init__.py').open('a') as handle:
             handle.write("\nfrom types import SimpleNamespace\ndef validate_calibration(config): pass\ndef load_inspection_model(*args): return SimpleNamespace(latent_dim=64, init_filters=128, layers=[2, 2, 2])\n")
 
@@ -221,7 +228,7 @@ class InspectionTests(unittest.TestCase):
         self._prepare_preflight_fixture()
         root = Path(__file__).resolve().parents[3]
         settings = {
-            'repository': str(self.repo), 'python': sys.executable,
+            'repository': str(self.repo), 'python': str(self.config.python),
             'data_roots': [str(self.data)], 'artifact_root': str(self.config.artifact_root),
             'writable_data_roots': [str(self.data)]
         }

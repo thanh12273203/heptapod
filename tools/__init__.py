@@ -22,6 +22,8 @@ for _name in (
     "feyngraph",
     "feynrules",
     "inspire",
+    "literature",
+    "llp",
     "logging",
     "mg5",
     "nda",
@@ -29,6 +31,7 @@ for _name in (
     "pythia",
     "sherpa",
     "units",
+    "wolfram",
 ):
     try:
         __import__(f"{__name__}.{_name}")

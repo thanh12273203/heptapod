@@ -18,7 +18,8 @@
 
 - [ ] **Generate UFO from .fr model**
   - Locate: `feynrules/models/S1_LQ_RR.fr` (ALREADY EXISTS)
-  - Call `FeynRulesToUFOTool(model_path="feynrules/models/S1_LQ_RR.fr", output_dir="feynrules/S1_LQ_RR_UFO")`
+  - Call `FeynRulesToUFOTool(model_path="feynrules/models/S1_LQ_RR.fr", lagrangian="LSM + LBSM", output_dir="feynrules/S1_LQ_RR_UFO")`
+  - `lagrangian` is required; this model names its BSM Lagrangian `LBSM`, but that is not a convention. Omit it and the tool lists the symbols the model defines.
   - Verify: check output JSON `"ok": true`, confirm UFO files exist
 
 ---
@@ -39,8 +40,8 @@
 - [ ] **Shower LHE with Pythia (FOR EACH scan point if scan)**
   - Locate: `pythia/cards/pp_S1S1d_ljlj.cmnd` (ALREADY EXISTS)
   - Get LHE path(s) from Phase 2: `runs[i].lhe_file`
-  - For each LHE file, call `PythiaFromRunCardTool(cmnd_path="pythia/cards/S1_LQ_RR_pp_ljlj.cmnd", data_dir="data/pythia_m<mass>", lhe_path=<lhe_file>, n_events=5000, shower_lhe=True, finals_only=True, full_history=False, seed=<unique_seed>)`
-  - Track: which `events_jsonl` corresponds to which scan mass point
+  - For each LHE file, call `PythiaFromRunCardTool(cmnd_path="pythia/cards/S1_LQ_RR_pp_ljlj.cmnd", data_dir="data/pythia_m<mass>", lhe_path=<lhe_file>, n_events=5000, shower_lhe=True, seed=<unique_seed>)`
+  - Track: which `events` dataset corresponds to which scan mass point
   - Output: `events.jsonl` per mass point
   - Use `EventJSONLToNumpyTool` to convert particle data (FOR EACH mass point) for future processing:
     - Input: `data/pythia_m<mass>/events.jsonl` from Phase 3
@@ -51,8 +52,8 @@
 ## Phase 4: Jet Clustering
 
 - [ ] **Cluster jets (FOR EACH mass point)**
-  - Get `events_jsonl` from Phase 3
-  - Call `JetClusterSlowJetTool(jsonl_path=<events_jsonl>, cluster_all=True, output_path="data/jets_m<mass>.jsonl", algorithm="antikt", R=0.4, ptmin=50.0, etamax=2.8)`
+  - Get `events` (the dataset path) from Phase 3
+  - Call `JetClusterSlowJetTool(events_path=<events>, cluster_all=True, output_path="data/jets_m<mass>.jsonl", algorithm="antikt", R=0.4, ptmin=50.0, etamax=2.8)`
   - Cluster **all** jets `cluster_all=True`, **DO NOT** use `event_index` argument.
   - Output: clustered jets JSONL per mass point
   - Use `JetsJSONLToNumpyTool` to convert jet data (FOR EACH mass point) for future processing:
